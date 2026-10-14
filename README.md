@@ -84,3 +84,46 @@ Outputs per run: `config.json, splits.csv` (row indices per fold), `fold_metrics
 * PyTorch training code was not executed where this was written (no torch there); the data pipeline (omics/pathway
   caching, drug cache, splits, leakage checks, adapters) was run on synthetic data. Run step 1 first and report any error.
 * DrugComb vs GDSC2 Bliss values are on different scales; trust correlations/AUROC more than RMSE externally.
+
+
+---
+
+## 📬 Contact
+
+<table>
+<tr>
+<td width="65%">
+
+### 👤 Research Profile
+
+**Name:** Abhay Nath |
+**Affiliation:** AI-ML Research Scientist
+
+**📧 Email:** [dr.abhaynath001@gmail.com](mailto:dr.abhaynath001@gmail.com)
+**🔗 GitHub:** https://github.com/AbhayNath001
+**🎓 LinkedIn:** https://www.linkedin.com/in/abhaynath001/ 
+
+**🧪 Research Areas:**
+
+* Artificial Intelligence
+* Machine Learning
+* Deep Learning
+* Computer Vision
+* Generative AI
+* MedTech
+
+</td>
+
+<td width="35%" align="center">
+
+<img src="https://raw.githubusercontent.com/AbhayNath001/AbhayNath001/main/Passport%20Size%20Image%20(1).jpg" width="160" style="border:2px solid #e0e0e0; border-radius:12px; padding:6px;" />
+
+<br><br>
+
+<i>Abhay Nath | Kolkata, West Bengal, India</i>
+
+</td>
+</tr>
+</table>
+
+---
