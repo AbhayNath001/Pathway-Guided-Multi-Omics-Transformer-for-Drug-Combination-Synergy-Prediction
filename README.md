@@ -2,8 +2,6 @@
 
 This repository contains the PATH-SYN implementation and data-processing utilities. The primary experimental workflow described in the manuscript uses **DrugComb v1.5 response records** with **DepMap Public 24Q2** molecular profiles. GDSC combination-response measurements are not substituted for DrugComb in the manuscript workflow. A GDSC/CancerRxGene compound-annotation file may be supplied separately for drug-target annotations; it is not used as the drug-combination response table.
 
-> **Reproducibility and data availability.** Raw DepMap, DrugComb, MSigDB, compound-annotation and external-validation files are not bundled in this repository. Access and redistribution remain subject to the respective providers' terms. You must obtain the required files and pass their paths to the scripts. No performance metrics are hard-coded in the training or smoke-test scripts.
-
 ## 1. Repository layout
 
 ```text
@@ -23,7 +21,7 @@ scripts/
   make_synthetic_data.py  Generates a clearly labelled synthetic smoke-test dataset
   setup_real_data.py      Downloads DepMap 24Q2, DrugComb v1.5 and MSigDB files
 run_real.py               Configurable real-data preprocessing/training entry point
-run_all.py                Synthetic smoke test only; not a manuscript reproduction
+run_all.py                Synthetic smoke test
 requirements.txt
 ```
 
@@ -202,15 +200,15 @@ The evaluator reports the number of usable external rows after feature matching 
 
 For genuinely independent validation, audit source-study/record overlap between DrugComb v1.5 and each external source before running this command. A frozen checkpoint alone does not establish source independence if the same experimental records were used in model development.
 
-## 7. Synthetic smoke test (not manuscript validation)
+## 7. Synthetic smoke test
 
-`run_all.py` is deliberately limited to a small synthetic pipeline smoke test. It does not download DrugComb, does not reproduce the manuscript's real-data experiments and does not print or store claimed PATH-SYN performance metrics.
+`run_all.py` is deliberately limited to a small synthetic pipeline smoke test.
 
 ```bash
 python run_all.py --out runs/synthetic-smoke-test
 ```
 
-Use this only to check that the code modules can read the synthetic file formats and execute a short training pass. Synthetic metrics are not evidence of performance on experimentally measured drug combinations.
+Use this only to check that the code modules can read the synthetic file formats and execute a short training pass.
 
 ## 8. Outputs
 
@@ -221,16 +219,3 @@ For a cross-validation run, the output directory contains:
 - `predictions.csv`: held-out observations and prediction outputs.
 
 For a `full` run, the output includes `model.pt` and training configuration/scaler information. External runs write `external_predictions.csv` and `external_metrics.json`.
-
-No raw response data, trained checkpoint, intermediate cache, personal machine path, compiled Python bytecode or synthetic run log should be committed to the source repository.
-
-## 9. Citation and provenance
-
-Please cite the original data providers and record the exact releases used:
-- DrugComb v1.5 for combination response measurements.
-- DepMap Public 24Q2 for RNA, CNV, mutation and cell-line metadata.
-- MSigDB 2024.1.Hs for Hallmark, KEGG Legacy and Reactome gene sets.
-- PubChem for compound structures/SMILES.
-- The actual provider and release of the supplied drug-target annotation file.
-
-The repository's helper scripts document expected input formats; they do not replace the requirement to report the actual source files and releases used.
