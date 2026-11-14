@@ -1,55 +1,49 @@
-"""Download what can be downloaded automatically (MSigDB) and print manual steps for the rest.
-
-python scripts/download_data.py --msigdb-version 2024.1.Hs
-Check https://www.gsea-msigdb.org/gsea/msigdb for the newest release label and pass it via --msigdb-version.
-"""
+"""Data download helper and instructions for the PATH-SYN DrugComb v1.5 workflow."""
 import argparse
 import os
 import urllib.request
 
-FILES = ["h.all.v{v}.symbols.gmt", "c2.cp.kegg_legacy.v{v}.symbols.gmt",
-         "c2.cp.kegg_medicus.v{v}.symbols.gmt", "c2.cp.reactome.v{v}.symbols.gmt"]
-
-MANUAL = """
-MANUAL DOWNLOADS (these sites need a browser / click-through; file names can change between releases):
-
-1) DepMap (https://depmap.org/portal/data_page/  -> choose a release, e.g. the latest "DepMap Public 2xQy")
-   Put these in data/raw/depmap/ :
-     Model.csv
-     OmicsExpressionProteinCodingGenesTPMLogp1.csv
-     OmicsCNGene.csv
-     OmicsSomaticMutations.csv
-   (If your release uses different names, pass --expr-file/--cn-file/--mut-file/--model-file to pathsyn.preprocess.)
-
-2) GDSC2 combinations (https://gdsc-combinations.depmap.sanger.ac.uk/  -> Downloads)
-   Put the combination synergy table(s) in data/raw/gdsc2/ . Open the header, then convert with pathsyn.synergy
-   (see its docstring). Monotherapy IC50s are in the same portal / cancerrxgene.org bulk downloads.
-   Drug target annotation: cancerrxgene.org -> Downloads -> "screened_compounds" (columns DRUG_NAME, TARGET, TARGET_PATHWAY).
-
-3) DrugComb (https://drugcomb.org/download/ or the Zenodo record linked there)
-   Put summary_table*.csv in data/raw/drugcomb/ .
-"""
+FILES = [
+    "h.all.v{version}.symbols.gmt",
+    "c2.cp.kegg_legacy.v{version}.symbols.gmt",
+    "c2.cp.reactome.v{version}.symbols.gmt",
+]
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--msigdb-version", default="2024.1.Hs")
-    ap.add_argument("--out", default="data/raw/msigdb")
-    a = ap.parse_args()
-    os.makedirs(a.out, exist_ok=True)
-    base = f"https://data.broadinstitute.org/gsea-msigdb/msigdb/release/{a.msigdb_version}/"
-    for f in FILES:
-        name = f.format(v=a.msigdb_version)
-        dst = os.path.join(a.out, name)
-        if os.path.exists(dst):
-            print("have", name)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--msigdb-version", default="2024.1.Hs")
+    parser.add_argument("--out", default="data/real/msigdb")
+    args = parser.parse_args()
+
+    os.makedirs(args.out, exist_ok=True)
+    base = (
+        "https://data.broadinstitute.org/gsea-msigdb/msigdb/release/"
+        f"{args.msigdb_version}/"
+    )
+    for template in FILES:
+        filename = template.format(version=args.msigdb_version)
+        destination = os.path.join(args.out, filename)
+        if os.path.exists(destination):
+            print("already present:", destination)
             continue
         try:
-            urllib.request.urlretrieve(base + name, dst)
-            print("downloaded", name)
-        except Exception as e:  # noqa
-            print(f"FAILED {name}: {e}\n   -> download manually from {base}")
-    print(MANUAL)
+            urllib.request.urlretrieve(base + filename, destination)
+            print("downloaded:", destination)
+        except Exception as exc:
+            print(f"Could not download {filename}: {exc}")
+            print("Download it manually from:", base)
+
+    print(
+        "\nOther required inputs:\n"
+        "1. DepMap Public 24Q2: Model.csv, OmicsExpressionProteinCodingGenesTPMLogp1.csv, "
+        "OmicsCNGene.csv and OmicsSomaticMutations.csv.\n"
+        "2. DrugComb v1.5 summary response table (this is the manuscript's primary response source).\n"
+        "3. The verified drug-target annotation CSV used in the experiment. The helper supports "
+        "screened_compounds-style DRUG_NAME/SYNONYMS/TARGET columns.\n"
+        "Do not replace DrugComb synergy responses with GDSC2 responses. A GDSC/CancerRxGene "
+        "compound-annotation file, if used, is only the target-annotation input."
+    )
 
 
 if __name__ == "__main__":

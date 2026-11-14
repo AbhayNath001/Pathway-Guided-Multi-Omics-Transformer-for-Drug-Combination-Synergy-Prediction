@@ -1,129 +1,236 @@
-# PATH-SYN — pathway-guided multi-omics transformer for drug-combination synergy
+# PATH-SYN: Pathway-Guided Multi-Omics Transformer for Drug-Combination Synergy Prediction
 
-```
+This repository contains the PATH-SYN implementation and data-processing utilities. The primary experimental workflow described in the manuscript uses **DrugComb v1.5 response records** with **DepMap Public 24Q2** molecular profiles. GDSC combination-response measurements are not substituted for DrugComb in the manuscript workflow. A GDSC/CancerRxGene compound-annotation file may be supplied separately for drug-target annotations; it is not used as the drug-combination response table.
+
+> **Reproducibility and data availability.** Raw DepMap, DrugComb, MSigDB, compound-annotation and external-validation files are not bundled in this repository. Access and redistribution remain subject to the respective providers' terms. You must obtain the required files and pass their paths to the scripts. No performance metrics are hard-coded in the training or smoke-test scripts.
+
+## 1. Repository layout
+
+```text
 pathsyn/
-  omics.py              DepMap loading, MSigDB pathway tokens ([RNA, CNV, MUT] per pathway), raw baseline features
-  drugs.py              Morgan fingerprints (RDKit) + drug-target -> pathway vectors (optional ChemBERTa)
-  synergy.py            canonical synergy-table schema, GDSC2/DrugComb adapters, Bliss/HSA from raw dose matrices
-  preprocess.py         builds data/cache/{omics.npz, drugs.npz, pathway_genes.json, alias_map.json}
-  data.py               tensor dataset + splits (random / cell / pair / cancer_type cold-start, leakage-free)
-  model.py              PathSyn (cross-attention) and RawMLP baseline
-  train.py              training, CV, early stopping, MC-dropout, metrics, `--split full` final model
-  ablation.py           omics ablations + raw-feature baseline
-  evaluate_external.py  DrugComb validation (overlap filtering, leakage removal)
-  explain.py            pathway attributions (attention + gradient x input)
+  data.py                 Dataset construction and data splits
+  drugs.py                RDKit Morgan fingerprints and target-to-pathway mapping
+  evaluate_external.py    Frozen-model evaluation on a canonical external response table
+  model.py                PATH-SYN and baseline architectures
+  omics.py                DepMap parsing and pathway selection/feature construction
+  preprocess.py           Builds cached omics and drug features
+  synergy.py              Converts source response tables to the canonical schema
+  train.py                Training, cross-validation, prediction and metrics
+  utils.py                Shared utilities and metrics
 scripts/
-  download_data.py  build_drug_table.py  make_synthetic_data.py
+  build_drug_table.py     PubChem SMILES + supplied drug-target annotation table
+  download_data.py        Download instructions and MSigDB helper
+  make_synthetic_data.py  Generates a clearly labelled synthetic smoke-test dataset
+  setup_real_data.py      Downloads DepMap 24Q2, DrugComb v1.5 and MSigDB files
+run_real.py               Configurable real-data preprocessing/training entry point
+run_all.py                Synthetic smoke test only; not a manuscript reproduction
+requirements.txt
 ```
 
-## 0. Install
+## 2. Environment
+
+Python 3.10 or 3.11 is recommended. Install PyTorch from the official selector for the CPU/CUDA environment, then install the remaining dependencies:
+
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt          # install torch per https://pytorch.org for your CUDA version
+python -m venv .venv
+# Linux/macOS
+source .venv/bin/activate
+# Windows PowerShell
+# .venv\Scripts\Activate.ps1
+
+python -m pip install --upgrade pip
+pip install -r requirements.txt
 ```
 
-## 1. Smoke test (no downloads, ~minutes on CPU)
+RDKit is required for the reported Morgan fingerprints. The code stops with an informative error if RDKit is unavailable; it does not silently substitute hashed SMILES features.
+
+## 3. Required real-data inputs
+
+### 3.1 Drug-combination response data
+- DrugComb v1.5 summary response table.
+- The default converter preset expects the column names encoded in `pathsyn/synergy.py` (`cell_line_name`, `drug_row`, `drug_col`, `synergy_bliss`, `synergy_hsa`).
+- If your downloaded DrugComb v1.5 file uses different headers, inspect the CSV header and supply explicit column mappings to `pathsyn.synergy`; do not silently use a GDSC2 synergy table as a substitute.
+
+### 3.2 DepMap Public 24Q2
+The setup helper downloads these files where provider endpoints are available:
+- `Model.csv`
+- `OmicsExpressionProteinCodingGenesTPMLogp1.csv`
+- `OmicsCNGene.csv`
+- `OmicsSomaticMutations.csv`
+
+### 3.3 MSigDB 2024.1.Hs
+The setup helper downloads:
+- Hallmark: `h.all.v2024.1.Hs.symbols.gmt`
+- KEGG Legacy: `c2.cp.kegg_legacy.v2024.1.Hs.symbols.gmt`
+- Reactome: `c2.cp.reactome.v2024.1.Hs.symbols.gmt`
+
+### 3.4 Drug-target annotations
+The drug table builder requires an annotation CSV supplied by the user. The repository helper supports a GDSC/CancerRxGene `screened_compounds.csv`-style file with a drug-name column, an optional synonyms column, and a target-gene column (defaults: `DRUG_NAME`, `SYNONYMS`, `TARGET`). Specify the exact file/release used for the study when running the pipeline. This is a separate source from PubChem: PubChem is queried for compound SMILES, while the supplied annotation table provides target gene symbols. Target genes are mapped to the selected pathway gene sets to create the drug-to-pathway vector.
+
+If your target file has different headers, use `--target-name-col`, `--target-syn-col`, and `--target-col`. The run script requires the target-annotation file path so target information is not silently omitted. Unmatched compounds are reported and receive an all-zero target-pathway vector; inspect that report before accepting the cache.
+
+## 4. Pathway selection implemented in the code
+
+The pathway selector in `pathsyn/omics.py`:
+1. Intersects each MSigDB gene set with the protein-coding gene universe available in the DepMap expression matrix.
+2. Excludes candidate sets with fewer than 10 or more than 500 overlapping genes.
+3. Retains all eligible Hallmark sets.
+4. For each eligible KEGG and Reactome set, calculates the mean standardized expression of its member genes for each available cell line, then calculates the variance of that pathway-level score across cell lines.
+5. Selects the 75 highest-variance KEGG sets and 75 highest-variance Reactome sets by default.
+
+Thus, the default is up to 50 Hallmark + 75 KEGG + 75 Reactome tokens; the actual total depends on the number of eligible Hallmark sets and candidates in the supplied GMT files. The selected pathway names and their gene membership are saved in the cache (`omics.npz` and `pathway_genes.json`). To reproduce an existing model, use the same MSigDB release, DepMap inputs and selector parameters as the experiment that generated that model.
+
+**Preprocessing scope:** expression standardization and variance ranking are currently calculated over the cell lines loaded from the supplied DepMap files before the downstream response split is generated. Grouped evaluation splits hold out response records/groups, but this preprocessing is not a fully inductive, fold-specific pathway-selection pipeline. Interpret cold-start results accordingly; do not describe preprocessing as fold-isolated unless it has been rerun separately within each training fold.
+
+## 5. Prepare and run the DrugComb v1.5 workflow
+
+### 5.1 Download the public inputs
+
 ```bash
-python scripts/make_synthetic_data.py --out data/synthetic
-python -m pathsyn.preprocess --depmap-dir data/synthetic/depmap --msigdb-dir data/synthetic/msigdb \
-   --synergy data/synthetic/synergy.csv --drug-table data/synthetic/drugs.csv --out data/synthetic/cache
-python -m pathsyn.train --cache data/synthetic/cache --table data/synthetic/synergy.csv \
-   --split random --epochs 5 --max-folds 1 --out runs/synth
+python scripts/setup_real_data.py --out data/real --msigdb-version 2024.1.Hs
 ```
 
-## 2. Real data
+The script attempts to download DepMap 24Q2, DrugComb v1.5 and MSigDB gene sets. Some provider files may require manual access. If so, place the downloaded file in the printed directory and rerun with the appropriate `--skip-...` flag.
+
+### 5.2 Supply the target annotation file
+
+Obtain the exact target annotation release used for your study and save it locally, for example:
+
+```text
+data/external/screened_compounds.csv
+```
+
+Do not assume that the example filename establishes the annotation release. Record the actual provider, release/access date and file in the manuscript/supplementary information.
+
+### 5.3 Run preprocessing and training
+
 ```bash
-python scripts/download_data.py --msigdb-version 2024.1.Hs     # then follow the printed manual steps (DepMap, GDSC2, DrugComb)
-
-# (a) convert raw synergy tables to the canonical schema  (cell_line, drug_a, drug_b, bliss, hsa[, mono_a, mono_b])
-python -m pathsyn.synergy --in data/raw/drugcomb/summary_table_v1.4.csv --out data/processed/drugcomb.csv --preset drugcomb
-python -m pathsyn.synergy --in data/raw/gdsc2/<file>.csv --out data/processed/gdsc2.csv \
-   --cell-col <..> --drug-a-col <..> --drug-b-col <..> --bliss-col <..> --hsa-col <..> [--mono-a-col <..> --mono-b-col <..>]
-
-# (b) SMILES (PubChem) + targets (GDSC compound annotation)
-python scripts/build_drug_table.py --synergy data/processed/gdsc2.csv data/processed/drugcomb.csv \
-   --targets-csv data/raw/gdsc2/screened_compounds.csv --out data/processed/drugs.csv
-#     -> open drugs.csv, fill any missing SMILES by hand, re-run to resume
-
-# (c) cache omics + pathways + drugs
-python -m pathsyn.preprocess --depmap-dir data/raw/depmap --msigdb-dir data/raw/msigdb \
-   --synergy data/processed/gdsc2.csv data/processed/drugcomb.csv --drug-table data/processed/drugs.csv --out data/cache
+python run_real.py \
+  --data-dir data/real \
+  --targets-csv data/external/screened_compounds.csv \
+  --split random \
+  --epochs 30 \
+  --batch-size 32 \
+  --folds 5 \
+  --seed 42 \
+  --n-kegg 75 \
+  --n-reactome 75 \
+  --out runs/drugcomb_v1_5
 ```
 
-## 3. Experiments
+The run script:
+1. Locates/downloads the DrugComb v1.5 summary file.
+2. Converts it to the canonical schema (`cell_line, drug_a, drug_b, bliss, hsa`).
+3. Retrieves compound SMILES from PubChem and reads target genes from the supplied annotation file.
+4. Builds DepMap/MSigDB pathway features and drug fingerprints/target-pathway features.
+5. Runs the requested evaluation split and writes configuration, fold metrics, predictions and split assignments.
+
+If the DrugComb header differs from the default preset, convert it manually:
+
 ```bash
-T="--cache data/cache --table data/processed/gdsc2.csv"
-python -m pathsyn.train $T --split random      --out runs/random          # stratified 5-fold CV
-python -m pathsyn.train $T --split cell        --out runs/cell_cold       # unseen cell lines
-python -m pathsyn.train $T --split pair        --out runs/pair_cold       # unseen drug pairs
-python -m pathsyn.train $T --split cancer_type --out runs/loco            # leave-one-lineage-out
-python -m pathsyn.ablation $T --split cell --out runs/ablation            # rna/cnv/mut combos + raw baseline
-python -m pathsyn.train $T --split full --out runs/final                  # final model on all data
-python -m pathsyn.evaluate_external --model runs/final/model.pt --cache data/cache \
-   --table data/processed/drugcomb.csv --train-table data/processed/gdsc2.csv --out runs/external
-python -m pathsyn.explain --model runs/final/model.pt --cache data/cache --cell MCF7 --drug-a <A> --drug-b <B>
+python -m pathsyn.synergy \
+  --in data/real/drugcomb/<downloaded-file>.csv \
+  --out data/real/processed/drugcomb.csv \
+  --cell-col <CELL_LINE_COLUMN> \
+  --drug-a-col <DRUG_A_COLUMN> \
+  --drug-b-col <DRUG_B_COLUMN> \
+  --bliss-col <BLISS_COLUMN> \
+  --hsa-col <HSA_COLUMN>
 ```
-Outputs per run: `config.json, splits.csv` (row indices per fold), `fold_metrics.csv, summary.csv, predictions.csv`
-(with MC-dropout std), and `model.pt` for `--split full`.
 
-## Design notes / things to know
-* **Pathway tokens**: per cell line and pathway, 3 features = mean z-scored expression, mean centred CN, fraction of
-  member genes mutated; z-scored across cell lines. Hallmark (all) + top-variance KEGG/Reactome sets (default 50+75+75).
-* **Drug-target alignment**: pathways hit by a drug's targets get a learned "targeted by A/B" embedding added to their
-  token, and the drug token also receives a projection of its target-pathway vector.
-* **Cross-attention**: queries = [CLS, drugA, drugB]; keys/values = pathway tokens. Auxiliary monotherapy pass uses
-  [CLS, drug] through the same network (needs `mono_a/mono_b`; skipped if absent).
-* Drug order is randomly swapped in training and predictions are averaged over both orders (symmetry).
-* Splits are seeded (42); validation for early stopping is grouped like the test split, so cold-start stays cold-start.
-* Synergy label = `bliss > --syn-threshold` (default 0). Many papers use a stricter cut (e.g. 5 or 10) — tune it.
+Then use `run_real.py --skip-download --drugcomb-csv data/real/processed/drugcomb.csv ...`.
 
-## Caveats
-* The Python modules were written to match the *documented* DepMap / MSigDB / DrugComb layouts, but I could not download
-  real data in the build environment. **Check your headers**: file names/columns change between DepMap releases and
-  the GDSC2 combination download (hence the explicit `--*-col` flags and `--expr-file` etc.).
-* PyTorch training code was not executed where this was written (no torch there); the data pipeline (omics/pathway
-  caching, drug cache, splits, leakage checks, adapters) was run on synthetic data. Run step 1 first and report any error.
-* DrugComb vs GDSC2 Bliss values are on different scales; trust correlations/AUROC more than RMSE externally.
+### 5.4 Evaluation splits
 
+Supported splits are:
+- `random`: stratified five-fold row-level evaluation.
+- `cell`: grouped cell-line cold-start.
+- `pair`: grouped unordered drug-pair cold-start.
+- `cancer_type`: leave-one-lineage-out.
+- `full`: trains a checkpoint with a within-training validation subset for early stopping and does not report a held-out test score. This checkpoint can be used for external evaluation.
 
----
+Example final checkpoint run:
 
-## 📬 Contact
+```bash
+python run_real.py \
+  --data-dir data/real \
+  --targets-csv data/external/screened_compounds.csv \
+  --split full \
+  --epochs 30 \
+  --batch-size 32 \
+  --folds 5 \
+  --seed 42 \
+  --out runs/drugcomb_final
+```
 
-<table>
-<tr>
-<td width="65%">
+The model checkpoint is saved under the selected output directory (see the command output).
 
-### 👤 Research Profile
+## 6. External evaluation with a frozen checkpoint
 
-**Name:** Abhay Nath |
-**Affiliation:** AI-ML Research Scientist
+External response tables must first be converted to the same canonical schema. To represent external compounds in the feature cache, pass their canonical response tables through `--extra-synergy` during preprocessing; these files are used to build compound features and are **not** used as training response labels.
 
-**📧 Email:** [dr.abhaynath001@gmail.com](mailto:dr.abhaynath001@gmail.com)
-**🔗 GitHub:** https://github.com/AbhayNath001
-**🎓 LinkedIn:** https://www.linkedin.com/in/abhaynath001/ 
+Example:
 
-**🧪 Research Areas:**
+```bash
+python run_real.py \
+  --data-dir data/real \
+  --targets-csv data/external/screened_compounds.csv \
+  --extra-synergy data/real/external/nci_almanac.csv data/real/external/az_sanger.csv \
+  --split full \
+  --out runs/drugcomb_final
+```
 
-* Artificial Intelligence
-* Machine Learning
-* Deep Learning
-* Computer Vision
-* Generative AI
-* MedTech
+Then evaluate each external table without updating the checkpoint:
 
-</td>
+```bash
+python -m pathsyn.evaluate_external \
+  --model runs/drugcomb_final/full/model.pt \
+  --cache data/real/cache \
+  --table data/real/external/nci_almanac.csv \
+  --train-table data/real/processed/drugcomb_v1_5.csv \
+  --out runs/external/nci_almanac
 
-<td width="35%" align="center">
+python -m pathsyn.evaluate_external \
+  --model runs/drugcomb_final/full/model.pt \
+  --cache data/real/cache \
+  --table data/real/external/az_sanger.csv \
+  --train-table data/real/processed/drugcomb_v1_5.csv \
+  --out runs/external/az_sanger
+```
 
-<img src="https://raw.githubusercontent.com/AbhayNath001/AbhayNath001/main/Passport%20Size%20Image%20(1).jpg" width="160" style="border:2px solid #e0e0e0; border-radius:12px; padding:6px;" />
+The evaluator reports the number of usable external rows after feature matching and exact (cell-line, unordered-drug-pair) overlap removal. By default it permits cell lines available in the DepMap feature cache, including cell lines not represented in the training response table, and requires external drugs to have cached feature vectors. Use `--cell-policy seen` or `--require any|both` only when that restriction is intended. The retained count can therefore be smaller than the raw external manifest.
 
-<br><br>
+For genuinely independent validation, audit source-study/record overlap between DrugComb v1.5 and each external source before running this command. A frozen checkpoint alone does not establish source independence if the same experimental records were used in model development.
 
-<i>Abhay Nath | Kolkata, West Bengal, India</i>
+## 7. Synthetic smoke test (not manuscript validation)
 
-</td>
-</tr>
-</table>
+`run_all.py` is deliberately limited to a small synthetic pipeline smoke test. It does not download DrugComb, does not reproduce the manuscript's real-data experiments and does not print or store claimed PATH-SYN performance metrics.
 
----
+```bash
+python run_all.py --out runs/synthetic-smoke-test
+```
+
+Use this only to check that the code modules can read the synthetic file formats and execute a short training pass. Synthetic metrics are not evidence of performance on experimentally measured drug combinations.
+
+## 8. Outputs
+
+For a cross-validation run, the output directory contains:
+- `config.json`: exact command-line configuration.
+- `splits.csv`: row indices assigned to train/validation/test for each fold.
+- `fold_metrics.csv` and `summary.csv`: metrics calculated from the run.
+- `predictions.csv`: held-out observations and prediction outputs.
+
+For a `full` run, the output includes `model.pt` and training configuration/scaler information. External runs write `external_predictions.csv` and `external_metrics.json`.
+
+No raw response data, trained checkpoint, intermediate cache, personal machine path, compiled Python bytecode or synthetic run log should be committed to the source repository.
+
+## 9. Citation and provenance
+
+Please cite the original data providers and record the exact releases used:
+- DrugComb v1.5 for combination response measurements.
+- DepMap Public 24Q2 for RNA, CNV, mutation and cell-line metadata.
+- MSigDB 2024.1.Hs for Hallmark, KEGG Legacy and Reactome gene sets.
+- PubChem for compound structures/SMILES.
+- The actual provider and release of the supplied drug-target annotation file.
+
+The repository's helper scripts document expected input formats; they do not replace the requirement to report the actual source files and releases used.
