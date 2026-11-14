@@ -1,12 +1,8 @@
-"""External validation on DrugComb (or any canonical-schema table) with a model trained by `--split full`.
+"""Frozen-model evaluation on an external canonical-schema response table.
 
-python -m pathsyn.evaluate_external --model runs/final/model.pt --cache data/cache \
-    --table data/processed/drugcomb.csv --train-table data/processed/gdsc2.csv --out runs/external
-
-Rows are kept only if the cell line was in the training set and (>=1 | both) drugs were seen in training
-(--require any|both); exact (cell line, drug pair) combos that are in the training table are REMOVED to avoid leakage.
-NOTE: DrugComb and GDSC2 use different dose ranges / curve-fitting, so absolute Bliss values are not on the same scale;
-rank metrics (Pearson/Spearman/AUROC/AUPRC) are the meaningful ones, RMSE is only indicative.
+External tables must contain cell_line, drug_a, drug_b, bliss and hsa. External
+cell lines and drugs must be represented in the DepMap/chemical feature cache.
+Exact training (cell-line, unordered-drug-pair) records are removed.
 """
 import argparse
 import json
@@ -21,47 +17,75 @@ from .train import build_model, pred_frame, predict, score
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--model", required=True)
-    ap.add_argument("--cache", default="data/cache")
-    ap.add_argument("--table", required=True)
-    ap.add_argument("--train-table", required=True)
-    ap.add_argument("--out", default="runs/external")
-    ap.add_argument("--require", choices=["any", "both"], default="any")
-    ap.add_argument("--mc", type=int, default=30)
-    ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    a = ap.parse_args(argv)
-    os.makedirs(a.out, exist_ok=True)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", required=True)
+    parser.add_argument("--cache", default="data/cache")
+    parser.add_argument("--table", required=True, help="External canonical response table")
+    parser.add_argument("--train-table", required=True, help="Canonical response table used for model development")
+    parser.add_argument("--out", default="runs/external")
+    parser.add_argument("--cell-policy", choices=["available", "seen"], default="available",
+                         help="available: any cell line in the omics cache; seen: only training cell lines")
+    parser.add_argument("--require", choices=["none", "any", "both"], default="none",
+                         help="Require none/any/both drugs to have appeared in the training response table")
+    parser.add_argument("--mc", type=int, default=30)
+    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    args = parser.parse_args(argv)
+    os.makedirs(args.out, exist_ok=True)
 
-    ck = torch.load(a.model, map_location=a.device)
-    cfg, sc = ck["cfg"], ck["scalers"]
-    tr = PathSynData(a.cache, a.train_table, cfg["syn_threshold"], "cpu", verbose=False)
-    ext = PathSynData(a.cache, a.table, cfg["syn_threshold"], a.device)
+    checkpoint = torch.load(args.model, map_location=args.device)
+    config, scalers = checkpoint["cfg"], checkpoint["scalers"]
+    train_data = PathSynData(args.cache, args.train_table, config["syn_threshold"], "cpu", verbose=False)
+    external_data = PathSynData(args.cache, args.table, config["syn_threshold"], args.device)
 
-    seen_cells, seen_drugs = set(tr.df.ci), set(tr.df.ia) | set(tr.df.ib)
-    train_keys = set(zip(tr.df.ci, tr.df.pair_key))
-    d = ext.df
-    n_seen = d.ia.isin(seen_drugs).astype(int) + d.ib.isin(seen_drugs).astype(int)
-    keep = d.ci.isin(seen_cells) & (n_seen >= (1 if a.require == "any" else 2))
-    keep &= ~pd.Series([(c, p) in train_keys for c, p in zip(d.ci, d.pair_key)], index=d.index)
-    idx = np.where(keep.values)[0]
-    print(f"[external] {len(idx)}/{len(d)} rows kept (seen cell line, drugs: {a.require}, not in training)")
-    if len(idx) == 0:
-        raise SystemExit("no overlapping rows")
+    seen_cells = set(train_data.df["cell_id"])
+    seen_drugs = set(train_data.df["ia"]) | set(train_data.df["ib"])
+    train_pairs = set(zip(train_data.df["cell_id"], train_data.df["pair_key"]))
 
-    model = build_model(cfg, ext).to(a.device)
-    model.load_state_dict(ck["state"])
-    pred = predict(model, ext, idx, sc, a.mc)
-    res = {"overall": score(ext, idx, pred), "n": int(len(idx))}
-    for k in (1, 2):
-        sub = np.where(n_seen.values[idx] == k)[0]
-        if len(sub) > 10:
-            res[f"drugs_seen_{k}"] = score(ext, idx[sub], {n: v[sub] for n, v in pred.items()})
-            res[f"drugs_seen_{k}"]["n"] = int(len(sub))
-    pred_frame(ext, idx, pred).to_csv(os.path.join(a.out, "external_predictions.csv"), index=False)
-    with open(os.path.join(a.out, "external_metrics.json"), "w") as f:
-        json.dump(res, f, indent=1)
-    print(json.dumps(res, indent=1))
+    external_frame = external_data.df
+    drug_seen_count = (
+        external_frame["ia"].isin(seen_drugs).astype(int)
+        + external_frame["ib"].isin(seen_drugs).astype(int)
+    )
+    keep = np.ones(len(external_frame), dtype=bool)
+    if args.cell_policy == "seen":
+        keep &= external_frame["cell_id"].isin(seen_cells).to_numpy()
+    if args.require == "any":
+        keep &= drug_seen_count.to_numpy() >= 1
+    elif args.require == "both":
+        keep &= drug_seen_count.to_numpy() == 2
+
+    exact_overlap = np.array([
+        (cell, pair) in train_pairs
+        for cell, pair in zip(external_frame["cell_id"], external_frame["pair_key"])
+    ])
+    keep &= ~exact_overlap
+    indices = np.flatnonzero(keep)
+
+    print(
+        f"[external] usable after feature matching: {len(external_frame)}; "
+        f"retained after overlap/policy filters: {len(indices)}"
+    )
+    if len(indices) == 0:
+        raise SystemExit("No eligible external records remain after feature matching and overlap filters.")
+
+    model = build_model(config, external_data).to(args.device)
+    model.load_state_dict(checkpoint["state"])
+    predictions = predict(model, external_data, indices, scalers, args.mc)
+    metrics = {
+        "overall": score(external_data, indices, predictions),
+        "n_retained": int(len(indices)),
+        "n_feature_matched": int(len(external_frame)),
+        "cell_policy": args.cell_policy,
+        "drug_policy": args.require,
+        "exact_training_pair_overlap_removed": int(exact_overlap.sum()),
+    }
+
+    pred_frame(external_data, indices, predictions).to_csv(
+        os.path.join(args.out, "external_predictions.csv"), index=False
+    )
+    with open(os.path.join(args.out, "external_metrics.json"), "w", encoding="utf-8") as handle:
+        json.dump(metrics, handle, indent=2)
+    print(json.dumps(metrics, indent=2))
 
 
 if __name__ == "__main__":

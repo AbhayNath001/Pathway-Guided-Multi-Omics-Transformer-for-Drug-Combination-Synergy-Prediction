@@ -41,7 +41,7 @@ def get_parser():
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--wd", type=float, default=1e-5)
     ap.add_argument("--bs", type=int, default=32)
-    ap.add_argument("--epochs", type=int, default=50)
+    ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--patience", type=int, default=5)
     ap.add_argument("--lam", type=float, default=1.0, help="weight of classification loss")
     ap.add_argument("--mu", type=float, default=0.5, help="weight of monotherapy auxiliary loss")
